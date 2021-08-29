@@ -16,6 +16,7 @@
  * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <ESPmDNS.h>
 #include <WiFi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
@@ -27,11 +28,15 @@
 
 #include "driver/gpio.h"
 
+// Volumio host
+const char *VolumioHost = "volumio";
+const int VolumioPort = 3000;
+
 // GPIO Setting
-#define PIN_LED           ((gpio_num_t)  2)
-#define PIN_BUTTON_CENTER ((gpio_num_t) 17)
-#define PIN_BUTTON_DOWN   ((gpio_num_t) 18)
-#define PIN_BUTTON_UP     ((gpio_num_t) 19)
+const gpio_num_t PIN_LED           = ((gpio_num_t)  2);
+const gpio_num_t PIN_BUTTON_CENTER = ((gpio_num_t) 17);
+const gpio_num_t PIN_BUTTON_DOWN   = ((gpio_num_t) 18);
+const gpio_num_t PIN_BUTTON_UP     = ((gpio_num_t) 19);
 
 // Configuration for button recognition
 const uint32_t RELEASE_IGNORE_COUNT = 8;
@@ -258,6 +263,9 @@ void setup()
   Serial.begin(115200);
   Serial.println("\n Starting");
 
+  // GPIO Initialize
+  GPIO_init();
+
   // Launch WiFiManager
   WiFiManager wifiManager;
 
@@ -271,12 +279,24 @@ void setup()
   Serial.print("Local IP: ");
   Serial.println(ipAddr);
 
-  // connect to Volumio Socket IO Server
-  socketIO.begin("192.168.0.24", 3000);
+  // search Volumio by mDNS
+  mdns_init();
+  IPAddress volumioIpAddr = MDNS.queryHost(VolumioHost);
+  if (volumioIpAddr == IPAddress(0, 0, 0, 0)) {
+    Serial.println("Can't find Volumio");
+    return;
+  }
+  Serial.print("Volumio IP: ");
+  Serial.println(volumioIpAddr);
+
+  // connect to Volumio Socket IO Server (Port: VolumioPort)
+  socketIO.begin(volumioIpAddr.toString(), VolumioPort);
   socketIO.onEvent(socketIOEvent);
+  while (!socketIO.isConnected()) {
+    socketIO.loop();
+  }
 
   // start UI task (button detection)
-  GPIO_init();
   ui_evt_queue = xQueueCreate(32, sizeof(uint8_t)); // queue length = 32
   xTaskCreatePinnedToCore(UI_Task, "UI_Task", 16384, NULL, 5, &th, 0);
 
@@ -287,6 +307,14 @@ void loop()
 {
   static unsigned long lastMillis = 0;
   uint64_t now = millis();
+
+  // Check if socketIO is connected
+  if (!socketIO.isConnected()) { // Error Blink
+    gpio_set_level(PIN_LED, (now % 200) >= 100);
+    delay(10);
+    return;
+  }
+
   socketIO.loop();
 
   // Receive UI Event
