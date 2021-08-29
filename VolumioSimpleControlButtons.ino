@@ -304,6 +304,7 @@ void loop()
         break;
       case EVT_RANDOM_ALBUM:
         emitJSON("callMethod", "{\"endpoint\": \"miscellanea/randomizer\", \"method\": \"randomAlbum\"}");
+        emitJSON("play", "{\"value\": 0}");
         break;
       default:
         break;
