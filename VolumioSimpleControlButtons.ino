@@ -1,3 +1,21 @@
+/*
+ * Volumio Simple Control Buttons
+ * Copyright (C) 2021  Elehobica
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version 2
+ * of the License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; If not, see <http://www.gnu.org/licenses/>.
+ */
+
 #include <WiFi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
@@ -15,45 +33,37 @@
 #define GPIO_INPUT_IO_18  ((gpio_num_t) 18)
 #define GPIO_INPUT_IO_19  ((gpio_num_t) 19)
 
-// GPIO Filter Setting
-#define NUM_SW_SHORT_FILTER 5
-#define NUM_SW_LONG_FILTER  10
+// Configuration for button recognition
+const uint32_t RELEASE_IGNORE_COUNT = 8;
+const uint32_t LONG_PUSH_COUNT = 10;
+const uint32_t LONG_LONG_PUSH_COUNT = 30;
 
-// U/I action
+// Button status
+typedef enum {
+  ButtonOpen = 0,
+  ButtonCenter,
+  ButtonUp,
+  ButtonDown
+} button_status_t;
+
+const uint32_t NUM_BTN_HISTORY = 30;
+button_status_t button_prv[NUM_BTN_HISTORY];
+uint32_t button_repeat_count = LONG_LONG_PUSH_COUNT; // to ignore first buttton press when power-on
+
+// UI action
 xQueueHandle ui_evt_queue = NULL;
 typedef enum {
-  EVT_TOGGLE = 0,
+  EVT_NONE = 0,
+  EVT_TOGGLE,
   EVT_VOLUME_UP,
   EVT_VOLUME_DOWN
 } ui_evt_t;
 
-// Task Handles
+// Task Handle
 TaskHandle_t th;
 
 // SocketIO Client
 SocketIOclient socketIO;
-
-// 
-unsigned long lastMillis = 0;
-
-void emit(const char *event, const char *data = "")
-{
-  DynamicJsonDocument doc(1024);
-  JsonArray array = doc.to<JsonArray>();
-  array.add(event);
-  if (strlen(data) == 0) {
-    JsonObject param1 = array.createNestedObject();
-  } else {
-    array.add(data);
-  }
-
-  String output;
-  serializeJson(doc, output);
-
-  // Send event
-  socketIO.sendEVENT(output);
-  Serial.println(output);
-}
 
 void GPIO_init()
 {
@@ -63,69 +73,117 @@ void GPIO_init()
   pinMode(GPIO_INPUT_IO_19, INPUT_PULLUP);
 }
 
-void GPIO_Task(void *pvParameters)
+button_status_t get_button_status()
 {
-  uint32_t sw;
-  uint32_t sw_short_filter[NUM_SW_SHORT_FILTER];
-  uint32_t sw_long_filter[NUM_SW_LONG_FILTER];
-  uint32_t sw_short_filter_all[2];
-  uint32_t sw_short_filter_rise;
-  uint32_t sw_long_filter_keep;
-  uint32_t sw_total_status;
-  for (int i = 0; i < NUM_SW_SHORT_FILTER; i++) sw_short_filter[i] = 0;
-  for (int i = 0; i < NUM_SW_LONG_FILTER; i++) sw_long_filter[i] = 0;
-  vTaskDelay(1000 / portTICK_PERIOD_MS);
-  for (int count = 0; ; count++) {
-    // SHORT FILTER (detect rising edge)
-    for (int i = NUM_SW_SHORT_FILTER-1; i >= 1; i--) {
-      sw_short_filter[i] = sw_short_filter[i-1];
-    }
-    sw = 0;
-    sw |= (~gpio_get_level(GPIO_INPUT_IO_17)&0x1)<<0;
-    sw |= (~gpio_get_level(GPIO_INPUT_IO_18)&0x1)<<1;
-    sw |= (~gpio_get_level(GPIO_INPUT_IO_19)&0x1)<<2;
-    sw_short_filter[0] = sw;
-    if (count % NUM_SW_SHORT_FILTER == 0) {
-      sw_short_filter_all[1] = sw_short_filter_all[0];
-      sw_short_filter_all[0] = 0xffffffff;
-      for (int i = 0; i < NUM_SW_SHORT_FILTER; i++) {
-        sw_short_filter_all[0] &= sw_short_filter[i];
-      }
-      sw_short_filter_rise = ~sw_short_filter_all[1] & sw_short_filter_all[0];
+    button_status_t ret;
+    if (gpio_get_level(GPIO_INPUT_IO_17) == 0) {
+        ret = ButtonCenter;
+    } else if (gpio_get_level(GPIO_INPUT_IO_18) == 0) {
+        ret = ButtonDown;
+    } else if (gpio_get_level(GPIO_INPUT_IO_19) == 0) {
+        ret = ButtonUp;
     } else {
-      sw_short_filter_rise = 0x00000000;
+        ret = ButtonOpen;
     }
-    // LONG FILTER (detect pushing)
-    if (count % 15 == 0) {
-      for (int i = NUM_SW_LONG_FILTER-1; i >= 1; i--) {
-        sw_long_filter[i] = sw_long_filter[i-1];
-      }
-      sw_long_filter[0] = sw_short_filter_all[0];
-      sw_long_filter_keep = 0xffffffff;
-      for (int i = 0; i < NUM_SW_LONG_FILTER; i++) {
-        sw_long_filter_keep &= sw_long_filter[i];
-      }
-    } else {
-      sw_long_filter_keep = 0x00000000;
-    }
-    // TOTAL (short & long)
-    sw_total_status = sw_short_filter_rise | (sw_long_filter_keep & 0b110); // Use short & long
-    //sw_total_status = sw_short_filter_rise; // Use short only
+    return ret;
+}
 
-    // Process
-    if (sw_total_status & (1<<0)) {
-      ui_evt_t ui_evt_id = EVT_TOGGLE;
-      xQueueSend(ui_evt_queue, &ui_evt_id, 10 / portTICK_RATE_MS);
+void trigger_ui_event(ui_evt_t ui_evt_id)
+{
+  //Serial.print("Trigger UI Event: ");
+  //Serial.println(ui_evt_id);
+  xQueueSend(ui_evt_queue, &ui_evt_id, 10 / portTICK_RATE_MS);
+}
+
+int count_center_clicks()
+{
+  int detected_fall = 0;
+  int clicks = 0;
+  for (int i = 0; i < 4; i++) {
+    if (button_prv[i] != ButtonOpen) {
+      return 0;
     }
-    if (sw_total_status & (1<<1)) {
-      ui_evt_t ui_evt_id = EVT_VOLUME_DOWN;
-      xQueueSend(ui_evt_queue, &ui_evt_id, 10 / portTICK_RATE_MS);
+  }
+  for (int i = 4; i < NUM_BTN_HISTORY; i++) {
+    if (detected_fall == 0 && button_prv[i-1] == ButtonOpen && button_prv[i] == ButtonCenter) {
+      detected_fall = 1;
+    } else if (detected_fall == 1 && button_prv[i-1] == ButtonCenter && button_prv[i] == ButtonOpen) {
+      clicks++;
+      detected_fall = 0;
     }
-    if (sw_total_status & (1<<2)) {
-      ui_evt_t ui_evt_id = EVT_VOLUME_UP;
-      xQueueSend(ui_evt_queue, &ui_evt_id, 10 / portTICK_RATE_MS);
+  }
+  if (clicks > 0) {
+    for (int i = 0; i < NUM_BTN_HISTORY; i++) button_prv[i] = ButtonOpen;
+  }
+  return clicks;
+}
+
+void update_button_action()
+{
+  button_status_t button = get_button_status();
+  if (button == ButtonOpen) {
+    // Ignore button release after long push
+    if (button_repeat_count > LONG_PUSH_COUNT) {
+      for (int i = 0; i < NUM_BTN_HISTORY; i++) {
+        button_prv[i] = ButtonOpen;
+      }
+      button = ButtonOpen;
     }
-    vTaskDelay(10 / portTICK_PERIOD_MS);
+    button_repeat_count = 0;
+    if (button_prv[RELEASE_IGNORE_COUNT] == ButtonCenter) { // center release
+      int center_clicks = count_center_clicks(); // must be called once per tick because button_prv[] status has changed
+      switch (center_clicks) {
+        case 1:
+          trigger_ui_event(EVT_TOGGLE);
+          break;
+        case 2:
+          //trigger_ui_event(EVT_NONE);
+          break;
+        case 3:
+          //trigger_ui_event(EVT_NONE);
+          break;
+        default:
+          break;
+      }
+    }
+  } else if (button_prv[0] == ButtonOpen) { // push
+    if (button == ButtonUp) {
+      trigger_ui_event(EVT_VOLUME_UP);
+    } else if (button == ButtonDown) {
+      trigger_ui_event(EVT_VOLUME_DOWN);
+    }
+  } else if (button_repeat_count == LONG_PUSH_COUNT) { // long push
+    if (button == ButtonCenter) {
+      //trigger_ui_event(EVT_NONE);
+      button_repeat_count++; // only once and step to longer push event
+    } else if (button == ButtonUp) {
+      trigger_ui_event(EVT_VOLUME_UP);
+    } else if (button == ButtonDown) {
+      trigger_ui_event(EVT_VOLUME_DOWN);
+    }
+  } else if (button_repeat_count == LONG_LONG_PUSH_COUNT) { // long long push
+    if (button == ButtonCenter) {
+      //trigger_ui_event(EVT_NONE);
+    }
+    button_repeat_count++; // only once and step to longer push event
+  } else if (button == button_prv[0]) {
+    button_repeat_count++;
+  }
+  // Button status shift
+  for (int i = NUM_BTN_HISTORY-2; i >= 0; i--) {
+    button_prv[i+1] = button_prv[i];
+  }
+  button_prv[0] = button;
+}
+
+void UI_Task(void *pvParameters)
+{
+  // Initialize
+  for (int i = 0; i < NUM_BTN_HISTORY; i++) button_prv[i] = ButtonOpen;
+  vTaskDelay(100 / portTICK_PERIOD_MS);
+  while (true) {
+    update_button_action();
+    vTaskDelay(50 / portTICK_PERIOD_MS);
   }
 }
 
@@ -157,6 +215,26 @@ void socketIOEvent(socketIOmessageType_t type, uint8_t * payload, size_t length)
   } 
 }
 
+void emit(const char *event, const char *data = "")
+{
+  DynamicJsonDocument doc(1024);
+  JsonArray array = doc.to<JsonArray>();
+  array.add(event);
+  if (strlen(data) == 0) {
+    JsonObject param1 = array.createNestedObject();
+  } else {
+    array.add(data);
+  }
+
+  String output;
+  serializeJson(doc, output);
+
+  // Send event
+  socketIO.sendEVENT(output);
+  Serial.print("SocketIO emit: ");
+  Serial.println(output);
+}
+
 void setup()
 {
   Serial.begin(115200);
@@ -170,25 +248,27 @@ void setup()
   //if you get here you have connected to the WiFi
   IPAddress ipAddr = WiFi.localIP();
 
-  Serial.println("Connected");
-  Serial.println("Local IP");
-  Serial.println(ipAddr);
+  Serial.println("WiFi Connected");
+  Serial.print("SSID: ");
   Serial.println(WiFi.SSID());
+  Serial.print("Local IP: ");
+  Serial.println(ipAddr);
 
   // connect to Volumio Socket IO Server
   socketIO.begin("192.168.0.24", 3000);
   socketIO.onEvent(socketIOEvent);
 
-  // GPIO Task
+  // UI task (button detection)
   GPIO_init();
   ui_evt_queue = xQueueCreate(32, sizeof(uint8_t)); // queue length = 32
-  xTaskCreatePinnedToCore(GPIO_Task, "GPIO_Task", 8192, NULL, 5, &th, 0);
+  xTaskCreatePinnedToCore(UI_Task, "UI_Task", 8192, NULL, 5, &th, 0);
 
   gpio_set_level(GPIO_OUTPUT_LED, 1);
 }
 
 void loop()
 {
+  static unsigned long lastMillis = 0;
   uint64_t now = millis();
   socketIO.loop();
 
