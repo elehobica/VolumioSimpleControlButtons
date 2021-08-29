@@ -28,10 +28,10 @@
 #include "driver/gpio.h"
 
 // GPIO Setting
-#define GPIO_OUTPUT_LED   ((gpio_num_t) 2)
-#define GPIO_INPUT_IO_17  ((gpio_num_t) 17)
-#define GPIO_INPUT_IO_18  ((gpio_num_t) 18)
-#define GPIO_INPUT_IO_19  ((gpio_num_t) 19)
+#define PIN_LED           ((gpio_num_t)  2)
+#define PIN_BUTTON_CENTER ((gpio_num_t) 17)
+#define PIN_BUTTON_DOWN   ((gpio_num_t) 18)
+#define PIN_BUTTON_UP     ((gpio_num_t) 19)
 
 // Configuration for button recognition
 const uint32_t RELEASE_IGNORE_COUNT = 8;
@@ -68,32 +68,25 @@ SocketIOclient socketIO;
 
 void GPIO_init()
 {
-  pinMode(GPIO_OUTPUT_LED, OUTPUT);
-  pinMode(GPIO_INPUT_IO_17, INPUT_PULLUP);
-  pinMode(GPIO_INPUT_IO_18, INPUT_PULLUP);
-  pinMode(GPIO_INPUT_IO_19, INPUT_PULLUP);
+  pinMode(PIN_LED, OUTPUT);
+  pinMode(PIN_BUTTON_CENTER, INPUT_PULLUP);
+  pinMode(PIN_BUTTON_DOWN, INPUT_PULLUP);
+  pinMode(PIN_BUTTON_UP, INPUT_PULLUP);
 }
 
 button_status_t get_button_status()
 {
-    button_status_t ret;
-    if (gpio_get_level(GPIO_INPUT_IO_17) == 0) {
-        ret = ButtonCenter;
-    } else if (gpio_get_level(GPIO_INPUT_IO_18) == 0) {
-        ret = ButtonDown;
-    } else if (gpio_get_level(GPIO_INPUT_IO_19) == 0) {
-        ret = ButtonUp;
-    } else {
-        ret = ButtonOpen;
-    }
-    return ret;
-}
-
-void trigger_ui_event(ui_evt_t ui_evt_id)
-{
-  //Serial.print("Trigger UI Event: ");
-  //Serial.println(ui_evt_id);
-  xQueueSend(ui_evt_queue, &ui_evt_id, 10 / portTICK_RATE_MS);
+  button_status_t ret;
+  if (gpio_get_level(PIN_BUTTON_CENTER) == 0) {
+    ret = ButtonCenter;
+  } else if (gpio_get_level(PIN_BUTTON_DOWN) == 0) {
+    ret = ButtonDown;
+  } else if (gpio_get_level(PIN_BUTTON_UP) == 0) {
+    ret = ButtonUp;
+  } else {
+    ret = ButtonOpen;
+  }
+  return ret;
 }
 
 int count_center_clicks()
@@ -117,6 +110,13 @@ int count_center_clicks()
     for (int i = 0; i < NUM_BTN_HISTORY; i++) button_prv[i] = ButtonOpen;
   }
   return clicks;
+}
+
+void trigger_ui_event(ui_evt_t ui_evt_id)
+{
+  //Serial.print("Trigger UI Event: ");
+  //Serial.println(ui_evt_id);
+  xQueueSend(ui_evt_queue, &ui_evt_id, 10 / portTICK_RATE_MS);
 }
 
 void update_button_action()
@@ -254,6 +254,7 @@ void emitJSON(const char *event, const char *json)
 
 void setup()
 {
+  // Serial
   Serial.begin(115200);
   Serial.println("\n Starting");
 
@@ -264,7 +265,6 @@ void setup()
   
   //if you get here you have connected to the WiFi
   IPAddress ipAddr = WiFi.localIP();
-
   Serial.println("WiFi Connected");
   Serial.print("SSID: ");
   Serial.println(WiFi.SSID());
@@ -275,12 +275,12 @@ void setup()
   socketIO.begin("192.168.0.24", 3000);
   socketIO.onEvent(socketIOEvent);
 
-  // UI task (button detection)
+  // start UI task (button detection)
   GPIO_init();
   ui_evt_queue = xQueueCreate(32, sizeof(uint8_t)); // queue length = 32
   xTaskCreatePinnedToCore(UI_Task, "UI_Task", 16384, NULL, 5, &th, 0);
 
-  gpio_set_level(GPIO_OUTPUT_LED, 1);
+  gpio_set_level(PIN_LED, 1);
 }
 
 void loop()
@@ -316,8 +316,8 @@ void loop()
     lastMillis = now;
   }
   if (now - lastMillis < 10) {
-    gpio_set_level(GPIO_OUTPUT_LED, 1);
+    gpio_set_level(PIN_LED, 1);
   } else {
-    gpio_set_level(GPIO_OUTPUT_LED, 0);
+    gpio_set_level(PIN_LED, 0);
   }
 }
