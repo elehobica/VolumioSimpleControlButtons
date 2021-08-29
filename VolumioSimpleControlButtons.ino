@@ -56,7 +56,8 @@ typedef enum {
   EVT_NONE = 0,
   EVT_TOGGLE,
   EVT_VOLUME_UP,
-  EVT_VOLUME_DOWN
+  EVT_VOLUME_DOWN,
+  EVT_RANDOM_ALBUM
 } ui_evt_t;
 
 // Task Handle
@@ -140,7 +141,7 @@ void update_button_action()
           //trigger_ui_event(EVT_NONE);
           break;
         case 3:
-          //trigger_ui_event(EVT_NONE);
+          trigger_ui_event(EVT_RANDOM_ALBUM);
           break;
         default:
           break;
@@ -215,24 +216,40 @@ void socketIOEvent(socketIOmessageType_t type, uint8_t * payload, size_t length)
   } 
 }
 
-void emit(const char *event, const char *data = "")
+void emit(String string)
 {
-  DynamicJsonDocument doc(1024);
+  // Send event
+  socketIO.sendEVENT(string);
+  Serial.print("SocketIO emitText: ");
+  Serial.println(string);
+}
+
+void emitText(const char *event, const char *text)
+{
+  DynamicJsonDocument doc(256);
   JsonArray array = doc.to<JsonArray>();
   array.add(event);
-  if (strlen(data) == 0) {
-    JsonObject param1 = array.createNestedObject();
-  } else {
-    array.add(data);
-  }
+  array.add(text);
 
   String output;
   serializeJson(doc, output);
 
-  // Send event
-  socketIO.sendEVENT(output);
-  Serial.print("SocketIO emit: ");
-  Serial.println(output);
+  emit(output);
+}
+
+void emitJSON(const char *event, const char *json)
+{
+  DynamicJsonDocument doc(64 + 256);
+  JsonArray array = doc.to<JsonArray>();
+  array.add(event);
+  DynamicJsonDocument jsonDoc(256);
+  deserializeJson(jsonDoc, json);
+  array.add(jsonDoc);
+
+  String output;
+  serializeJson(doc, output);
+
+  emit(output);
 }
 
 void setup()
@@ -261,7 +278,7 @@ void setup()
   // UI task (button detection)
   GPIO_init();
   ui_evt_queue = xQueueCreate(32, sizeof(uint8_t)); // queue length = 32
-  xTaskCreatePinnedToCore(UI_Task, "UI_Task", 8192, NULL, 5, &th, 0);
+  xTaskCreatePinnedToCore(UI_Task, "UI_Task", 16384, NULL, 5, &th, 0);
 
   gpio_set_level(GPIO_OUTPUT_LED, 1);
 }
@@ -277,13 +294,16 @@ void loop()
   if (xQueueReceive(ui_evt_queue, &ui_evt_id, 0)) {
     switch (ui_evt_id) {
       case EVT_TOGGLE:
-        emit("toggle");
+        emitJSON("toggle", "{}");
         break;
       case EVT_VOLUME_DOWN:
-        emit("volume", "-");
+        emitText("volume", "-");
         break;
       case EVT_VOLUME_UP:
-        emit("volume", "+");
+        emitText("volume", "+");
+        break;
+      case EVT_RANDOM_ALBUM:
+        emitJSON("callMethod", "{\"endpoint\": \"miscellanea/randomizer\", \"method\": \"randomAlbum\"}");
         break;
       default:
         break;
