@@ -269,6 +269,9 @@ void setup()
   // Launch WiFiManager
   WiFiManager wifiManager;
 
+  if (gpio_get_level(PIN_BUTTON_CENTER) == 0 && gpio_get_level(PIN_BUTTON_DOWN) == 0 && gpio_get_level(PIN_BUTTON_UP) == 0) {
+    wifiManager.resetSettings();
+  }
   wifiManager.autoConnect("OnDemandAP");
   
   //if you get here you have connected to the WiFi
