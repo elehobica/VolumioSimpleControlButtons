@@ -62,7 +62,8 @@ typedef enum {
   EVT_TOGGLE,
   EVT_VOLUME_UP,
   EVT_VOLUME_DOWN,
-  EVT_RANDOM_ALBUM
+  EVT_RANDOM_ALBUM,
+  EVT_PLAY_QUEUE_0
 } ui_evt_t;
 
 // Task Handle
@@ -147,6 +148,7 @@ void update_button_action()
           break;
         case 3:
           trigger_ui_event(EVT_RANDOM_ALBUM);
+          trigger_ui_event(EVT_PLAY_QUEUE_0);
           break;
         default:
           break;
@@ -225,7 +227,7 @@ void emit(String string)
 {
   // Send event
   socketIO.sendEVENT(string);
-  Serial.print("SocketIO emitText: ");
+  Serial.print("SocketIO emit: ");
   Serial.println(string);
 }
 
@@ -335,6 +337,8 @@ void loop()
         break;
       case EVT_RANDOM_ALBUM:
         emitJSON("callMethod", "{\"endpoint\": \"miscellanea/randomizer\", \"method\": \"randomAlbum\"}");
+        break;
+      case EVT_PLAY_QUEUE_0:
         emitJSON("play", "{\"value\": 0}");
         break;
       default:
