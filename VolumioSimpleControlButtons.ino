@@ -207,6 +207,7 @@ void socketIOEvent(socketIOmessageType_t type, uint8_t * payload, size_t length)
       socketIO.send(sIOtype_CONNECT, "/");
       break;
     case sIOtype_EVENT:
+      //Serial.printf("[IOc] get event: %s\n", payload);
       break;
     case sIOtype_ACK:
       Serial.printf("[IOc] get ack: %u\n", length);
@@ -301,9 +302,10 @@ void setup()
     socketIO.loop();
   }
 
+  // Queue Initialize
+  ui_evt_queue = xQueueCreate(32, sizeof(ui_evt_t));
   // start UI task (button detection)
-  ui_evt_queue = xQueueCreate(32, sizeof(uint8_t)); // queue length = 32
-  xTaskCreatePinnedToCore(UI_Task, "UI_Task", 16384, NULL, 5, &th, 0);
+  xTaskCreatePinnedToCore(UI_Task, "UI_Task", 1024*4, NULL, 5, &th, 0);
 
   gpio_set_level(PIN_LED, 1);
 }
@@ -342,6 +344,7 @@ void loop()
         emitJSON("play", "{\"value\": 0}");
         break;
       default:
+        Serial.printf("illegal UI event %d\n", ui_evt_id);
         break;
     }
     lastMillis = now;
