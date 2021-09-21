@@ -32,6 +32,16 @@
 const char *VolumioHost = "volumio";
 const int VolumioPort = 3000;
 
+// SocketIO status
+typedef enum {
+  None = 0,
+  WiFiNotConnected,
+  Disconnected,
+  Connected
+} socketIO_status_t;
+
+socketIO_status_t socketIO_status = None;
+
 // GPIO Setting
 const gpio_num_t PIN_LED           = ((gpio_num_t)  2);
 const gpio_num_t PIN_BUTTON_CENTER = ((gpio_num_t) 17);
@@ -65,11 +75,17 @@ typedef enum {
   EVT_RANDOM_ALBUM
 } ui_evt_t;
 
-// Task Handle
-TaskHandle_t th;
+// Task Handles
+TaskHandle_t th[2];
 
 // SocketIO Client
 SocketIOclient socketIO;
+
+// LED blink parameters
+unsigned long led_count = 0;
+const int led_blink_start = 20;
+const int led_blink_term = 4;
+const int led_interval_normal = 500;
 
 void GPIO_init()
 {
@@ -77,6 +93,11 @@ void GPIO_init()
   pinMode(PIN_BUTTON_CENTER, INPUT_PULLUP);
   pinMode(PIN_BUTTON_DOWN, INPUT_PULLUP);
   pinMode(PIN_BUTTON_UP, INPUT_PULLUP);
+}
+
+void LED_immediate_on()
+{
+  led_count = led_blink_start;
 }
 
 button_status_t get_button_status()
@@ -258,15 +279,31 @@ void emitJSON(const char *event, const char *json)
   emit(output);
 }
 
-void setup()
+bool connectVolumioSocketIO()
 {
-  // Serial
-  Serial.begin(115200);
-  Serial.println("\n Starting");
+  IPAddress volumioIpAddr = MDNS.queryHost(VolumioHost);
+  if (volumioIpAddr == IPAddress(0, 0, 0, 0)) {
+    Serial.println("Can't find Volumio");
+    return false;
+  }
+  Serial.print("Volumio IP: ");
+  Serial.println(volumioIpAddr);
 
-  // GPIO Initialize
-  GPIO_init();
+  int count = 0;
+  // connect to Volumio Socket IO Server (Port: VolumioPort)
+  socketIO.begin(volumioIpAddr.toString(), VolumioPort);
+  socketIO.onEvent(socketIOEvent);
+  while (!socketIO.isConnected()) {
+    socketIO.loop();
+    delay(1);
+    if (count++ > 100) { return false; }
+  }
+  return true;
+}
 
+void SocketIO_Task(void *pvParameters)
+{
+  socketIO_status = WiFiNotConnected;
   // Launch WiFiManager
   WiFiManager wifiManager;
 
@@ -276,6 +313,7 @@ void setup()
   wifiManager.autoConnect("OnDemandAP");
   
   //if you get here you have connected to the WiFi
+  socketIO_status = Disconnected;
   IPAddress ipAddr = WiFi.localIP();
   Serial.println("WiFi Connected");
   Serial.print("SSID: ");
@@ -285,79 +323,80 @@ void setup()
 
   // search Volumio by mDNS
   mdns_init();
-  IPAddress volumioIpAddr = MDNS.queryHost(VolumioHost);
-  if (volumioIpAddr == IPAddress(0, 0, 0, 0)) {
-    Serial.println("Can't find Volumio");
-    return;
-  }
-  Serial.print("Volumio IP: ");
-  Serial.println(volumioIpAddr);
+  connectVolumioSocketIO();
 
-  // connect to Volumio Socket IO Server (Port: VolumioPort)
-  socketIO.begin(volumioIpAddr.toString(), VolumioPort);
-  socketIO.onEvent(socketIOEvent);
-  while (!socketIO.isConnected()) {
+  while (true) {
     socketIO.loop();
+    socketIO_status = socketIO.isConnected() ? Connected : Disconnected;
+    ui_evt_t ui_evt_id;
+    if (socketIO_status == Disconnected) { // retry connect every 5 sec
+      while (xQueueReceive(ui_evt_queue, &ui_evt_id, 0)); // Ignore UI Event
+      connectVolumioSocketIO();
+      delay(5000);
+      continue;
+    }
+    // Receive UI Event
+    if (xQueueReceive(ui_evt_queue, &ui_evt_id, 0)) {
+      switch (ui_evt_id) {
+        case EVT_TOGGLE:
+          emitJSON("toggle", "{}");
+          break;
+        case EVT_VOLUME_DOWN:
+          emitText("volume", "-");
+          break;
+        case EVT_VOLUME_UP:
+          emitText("volume", "+");
+          break;
+        case EVT_RANDOM_ALBUM:
+          emitJSON("callMethod", "{\"endpoint\": \"miscellanea/randomizer\", \"method\": \"randomAlbum\"}");
+          // Wait 3 sec for new play list to be reflected
+          for (int i = 0; i < 30; i++) {
+            socketIO.loop();
+            delay(100);
+          }
+          emitJSON("play", "{\"value\": 0}");
+          break;
+        default:
+          Serial.printf("illegal UI event %d\n", ui_evt_id);
+          break;
+      }
+      LED_immediate_on();
+    }
+    delay(10);
   }
+}
+
+void setup()
+{
+  // Serial
+  Serial.begin(115200);
+  Serial.println("\n Starting");
+
+  // GPIO Initialize
+  GPIO_init();
 
   // Queue Initialize
   ui_evt_queue = xQueueCreate(32, sizeof(ui_evt_t));
-  // start UI task (button detection)
-  xTaskCreatePinnedToCore(UI_Task, "UI_Task", 1024*4, NULL, 5, &th, 0);
+
+  // Start SocketIO task
+  xTaskCreatePinnedToCore(SocketIO_Task, "SocketIO_Task", 1024*4, NULL, 5, &th[0], 0);
+
+  // Start UI task (button detection)
+  xTaskCreatePinnedToCore(UI_Task, "UI_Task", 1024*4, NULL, 5, &th[1], 0);
 
   gpio_set_level(PIN_LED, 1);
 }
 
 void loop()
 {
-  static unsigned long lastMillis = 0;
-  uint64_t now = millis();
-
-  // Check if socketIO is connected
-  if (!socketIO.isConnected()) { // Error Blink
-    gpio_set_level(PIN_LED, (now % 200) >= 100);
-    delay(10);
-    return;
-  }
-
-  socketIO.loop();
-
-  // Receive UI Event
-  ui_evt_t ui_evt_id;
-  if (xQueueReceive(ui_evt_queue, &ui_evt_id, 0)) {
-    switch (ui_evt_id) {
-      case EVT_TOGGLE:
-        emitJSON("toggle", "{}");
-        break;
-      case EVT_VOLUME_DOWN:
-        emitText("volume", "-");
-        break;
-      case EVT_VOLUME_UP:
-        emitText("volume", "+");
-        break;
-      case EVT_RANDOM_ALBUM:
-        emitJSON("callMethod", "{\"endpoint\": \"miscellanea/randomizer\", \"method\": \"randomAlbum\"}");
-        // Wait 3 sec for new play list to be reflected
-        for (int i = 0; i < 30; i++) {
-          socketIO.loop();
-          delay(100);
-        }
-        emitJSON("play", "{\"value\": 0}");
-        break;
-      default:
-        Serial.printf("illegal UI event %d\n", ui_evt_id);
-        break;
-    }
-    lastMillis = now;
-  }
-
-  // LED tick (Periodically and at UI Event)
-  if (now - lastMillis > 5000) {
-    lastMillis = now;
-  }
-  if (now - lastMillis < 10) {
+  // LED blink control
+  if (led_count > led_blink_start - led_blink_term && led_count <= led_blink_start) {
     gpio_set_level(PIN_LED, 1);
   } else {
     gpio_set_level(PIN_LED, 0);
   }
+  if (led_count-- <= 0) {
+    led_count = (socketIO_status == Disconnected) ? led_blink_start : led_interval_normal;
+  }
+  delay(10);
 }
