@@ -62,4 +62,3 @@ Arduino -> 'Sketch' -> 'Upload'
 
 ## Serial Log Example
 ![COM_log](doc/COM_log.png)
-
